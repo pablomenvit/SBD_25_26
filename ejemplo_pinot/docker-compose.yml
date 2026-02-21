@@ -1,74 +1,132 @@
-version: '3'
+version: "3.8"
 
 name: pinot
 
 services:
+  # -------------------------
+  # ZOOKEEPER ENSEMBLE (3)
+  # -------------------------
   zookeeper-1:
-    image: zookeeper:latest
+    image: zookeeper:3.9
     hostname: zookeeper-1
-    restart: "unless-stopped"
+    restart: unless-stopped
     ports:
-      - "2181:2181"
+      - "2181:2181"  # solo para acceder desde el host (tu navegador/terminal)
     environment:
       ZOO_MY_ID: 1
       ZOO_PORT: 2181
-      ZOO_SERVERS: server.1=zookeeper-1:2888:3888;2181 server.2=zookeeper-2:2888:3888;2181 server.3=zookeeper-3:2888:3888;2181 
+      ZOO_SERVERS: server.1=zookeeper-1:2888:3888;2181 server.2=zookeeper-2:2888:3888;2181 server.3=zookeeper-3:2888:3888;2181
     volumes:
       - zkData1:/data
       - zkCatalog1:/catalog
     healthcheck:
-      test: nc -z localhost 2181 || exit 1
+      test: ["CMD-SHELL", "nc -z localhost 2181 || exit 1"]
       interval: 10s
       timeout: 10s
-      retries: 10
+      retries: 15
 
   zookeeper-2:
-    image: zookeeper:latest
-    restart: "unless-stopped"
+    image: zookeeper:3.9
     hostname: zookeeper-2
+    restart: unless-stopped
+    # opcional exponer al host; internamente SIEMPRE es 2181
     ports:
       - "2182:2181"
     environment:
       ZOO_MY_ID: 2
       ZOO_PORT: 2181
-      ZOO_SERVERS: server.1=zookeeper-1:2888:3888;2181 server.2=zookeeper-2:2888:3888;2181 server.3=zookeeper-3:2888:3888;2181 
+      ZOO_SERVERS: server.1=zookeeper-1:2888:3888;2181 server.2=zookeeper-2:2888:3888;2181 server.3=zookeeper-3:2888:3888;2181
     volumes:
       - zkData2:/data
       - zkCatalog2:/catalog
     healthcheck:
-      test: nc -z localhost 2181 || exit 1
+      test: ["CMD-SHELL", "nc -z localhost 2181 || exit 1"]
       interval: 10s
       timeout: 10s
-      retries: 10
+      retries: 15
 
   zookeeper-3:
-    image: zookeeper:latest
-    restart: "unless-stopped"
+    image: zookeeper:3.9
     hostname: zookeeper-3
+    restart: unless-stopped
+    # opcional exponer al host; internamente SIEMPRE es 2181
     ports:
       - "2183:2181"
     environment:
       ZOO_MY_ID: 3
       ZOO_PORT: 2181
-      ZOO_SERVERS: server.1=zookeeper-1:2888:3888;2181 server.2=zookeeper-2:2888:3888;2181 server.3=zookeeper-3:2888:3888;2181 
+      ZOO_SERVERS: server.1=zookeeper-1:2888:3888;2181 server.2=zookeeper-2:2888:3888;2181 server.3=zookeeper-3:2888:3888;2181
     volumes:
       - zkData3:/data
       - zkCatalog3:/catalog
     healthcheck:
-      test: nc -z localhost 2181 || exit 1
+      test: ["CMD-SHELL", "nc -z localhost 2181 || exit 1"]
       interval: 10s
       timeout: 10s
-      retries: 10
+      retries: 15
 
+  # -------------------------
+  # KAFKA (1 broker, suficiente para la tarea)
+  # -------------------------
+  kafka:
+    image: bitnami/kafka:3.7
+    hostname: kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1'"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  # Crea el topic "events" automáticamente
+  kafka-init:
+    image: bitnami/kafka:3.7
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -lc "
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
+      --topic events --partitions 3 --replication-factor 1
+      && echo 'Topic events listo'
+      "
+    restart: "no"
+
+  # -------------------------
+  # PINOT CONTROLLERS (2)
+  #   - Internamente ambos usan 9001 (como pide el enunciado)
+  #   - Exponemos al host 9001 y 9002 para poder entrar a ambos
+  # -------------------------
   controller-1:
-    image: apachepinot/pinot:0.10.0
-    restart: "unless-stopped"
+    image: apachepinot/pinot:latest
     hostname: controller-1
+    restart: unless-stopped
     volumes:
-      - pinotController1:/tmp/data/controller
+      - pinotController1:/controller
+      - ./pinot:/pinot
     ports:
       - "9001:9001"
-    command: StartController -zkAddress zookeeper-1:2181,zookeeper-2:2182,zookeeper-3:2183 -clusterName PinotCluster -controllerPort 9001
+    command: >
+      bash -lc "
+      /opt/pinot/bin/pinot-admin.sh StartController
+      -zkAddress zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+      -clusterName PinotCluster
+      -controllerHost controller-1
+      -controllerPort 9001
+      -dataDir /controller
+      "
     depends_on:
       zookeeper-1:
         condition: service_healthy
@@ -77,116 +135,146 @@ services:
       zookeeper-3:
         condition: service_healthy
     healthcheck:
-      test: curl --fail -s http://controller-1:9001/ || exit 1
-      interval: 1m30s
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9001/health || exit 1"]
+      interval: 20s
       timeout: 10s
-      retries: 5
+      retries: 30
 
   controller-2:
-    image: apachepinot/pinot:0.10.0
-    restart: "unless-stopped"
+    image: apachepinot/pinot:latest
     hostname: controller-2
+    restart: unless-stopped
     volumes:
-      - pinotController2:/tmp/data/controller
+      - pinotController2:/controller
+      - ./pinot:/pinot
     ports:
-      - "9002:9002"
-    command: StartController -zkAddress zookeeper-1:2181,zookeeper-2:2182,zookeeper-3:2183 -clusterName PinotCluster -controllerPort 9002
+      - "9002:9001"   # host 9002 -> container 9001
+    command: >
+      bash -lc "
+      /opt/pinot/bin/pinot-admin.sh StartController
+      -zkAddress zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+      -clusterName PinotCluster
+      -controllerHost controller-2
+      -controllerPort 9001
+      -dataDir /controller
+      "
     depends_on:
-      zookeeper-1:
-        condition: service_healthy
-      zookeeper-2:
-        condition: service_healthy
-      zookeeper-3:
-        condition: service_healthy
       controller-1:
         condition: service_healthy
-    healthcheck:
-      test: curl --fail -s http://controller-2:9002/ || exit 1
-      interval: 1m30s
-      timeout: 10s
-      retries: 5
 
+  # -------------------------
+  # PINOT BROKERS (2)
+  #   - Internamente ambos usan 7001
+  #   - Exponemos al host 7001 y 7002
+  # -------------------------
   broker-1:
-    image: apachepinot/pinot:0.10.0
-    restart: "unless-stopped"
+    image: apachepinot/pinot:latest
     hostname: broker-1
+    restart: unless-stopped
     ports:
       - "7001:7001"
-    command: StartBroker -zkAddress zookeeper-1:2181,zookeeper-2:2182,zookeeper-3:2183 -clusterName PinotCluster -brokerPort 7001
+    command: >
+      bash -lc "
+      /opt/pinot/bin/pinot-admin.sh StartBroker
+      -zkAddress zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+      -clusterName PinotCluster
+      -brokerHost broker-1
+      -brokerPort 7001
+      "
     depends_on:
-      zookeeper-1:
-        condition: service_healthy
-      zookeeper-2:
-        condition: service_healthy
-      zookeeper-3:
-        condition: service_healthy
       controller-1:
-        condition: service_healthy
-      controller-2:
         condition: service_healthy
 
   broker-2:
-    image: apachepinot/pinot:0.10.0
-    restart: "unless-stopped"
+    image: apachepinot/pinot:latest
     hostname: broker-2
+    restart: unless-stopped
     ports:
-      - "7002:7002"
-    command: StartBroker -zkAddress zookeeper-1:2181,zookeeper-2:2182,zookeeper-3:2183 -clusterName PinotCluster -brokerPort 7002
+      - "7002:7001"   # host 7002 -> container 7001
+    command: >
+      bash -lc "
+      /opt/pinot/bin/pinot-admin.sh StartBroker
+      -zkAddress zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+      -clusterName PinotCluster
+      -brokerHost broker-2
+      -brokerPort 7001
+      "
     depends_on:
-      zookeeper-1:
-        condition: service_healthy
-      zookeeper-2:
-        condition: service_healthy
-      zookeeper-3:
-        condition: service_healthy
       controller-1:
         condition: service_healthy
-      controller-2:
-        condition: service_healthy
 
+  # -------------------------
+  # PINOT SERVERS (2)
+  #   - Internamente ambos usan 8001 (server) y 8011 (admin)
+  #   - Exponemos al host:
+  #       server-1: 8001/8011
+  #       server-2: 8002/8012
+  # -------------------------
   server-1:
-    image: apachepinot/pinot:0.10.0
-    restart: "unless-stopped"
+    image: apachepinot/pinot:latest
     hostname: server-1
+    restart: unless-stopped
     volumes:
-      - pinotServer1:/tmp/data/server
+      - pinotServer1:/server
     ports:
       - "8001:8001"
       - "8011:8011"
-    command: StartServer -zkAddress zookeeper-1:2181,zookeeper-2:2182,zookeeper-3:2183 -clusterName PinotCluster -serverPort 8001 -serverAdminPort 8011
+    command: >
+      bash -lc "
+      /opt/pinot/bin/pinot-admin.sh StartServer
+      -zkAddress zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+      -clusterName PinotCluster
+      -serverHost server-1
+      -serverPort 8001
+      -serverAdminPort 8011
+      -dataDir /server
+      "
     depends_on:
-      zookeeper-1:
-        condition: service_healthy
-      zookeeper-2:
-        condition: service_healthy
-      zookeeper-3:
-        condition: service_healthy
       controller-1:
-        condition: service_healthy
-      controller-2:
         condition: service_healthy
 
   server-2:
-    image: apachepinot/pinot:0.10.0
-    restart: "unless-stopped"
+    image: apachepinot/pinot:latest
     hostname: server-2
+    restart: unless-stopped
     volumes:
-      - pinotServer2:/tmp/data/server
+      - pinotServer2:/server
     ports:
-      - "8002:8002"
-      - "8012:8012"
-    command: StartServer -zkAddress zookeeper-1:2181,zookeeper-2:2182,zookeeper-3:2183 -clusterName PinotCluster -serverPort 8002 -serverAdminPort 8012
+      - "8002:8001"   # host 8002 -> container 8001
+      - "8012:8011"   # host 8012 -> container 8011
+    command: >
+      bash -lc "
+      /opt/pinot/bin/pinot-admin.sh StartServer
+      -zkAddress zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+      -clusterName PinotCluster
+      -serverHost server-2
+      -serverPort 8001
+      -serverAdminPort 8011
+      -dataDir /server
+      "
     depends_on:
-      zookeeper-1:
-        condition: service_healthy
-      zookeeper-2:
-        condition: service_healthy
-      zookeeper-3:
-        condition: service_healthy
       controller-1:
         condition: service_healthy
-      controller-2:
-        condition: service_healthy
+
+  # -------------------------
+  # PRODUCER (Python -> Kafka topic: events)
+  #   - Envía eventos JSON continuamente
+  # -------------------------
+  producer:
+    image: python:3.11-slim
+    hostname: producer
+    restart: unless-stopped
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    working_dir: /app
+    volumes:
+      - ./producer:/app
+    command: >
+      bash -lc "
+      pip -q install kafka-python &&
+      python producer.py
+      "
 
 volumes:
   zkData1:
